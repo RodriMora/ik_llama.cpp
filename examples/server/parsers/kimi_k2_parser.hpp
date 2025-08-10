@@ -361,6 +361,106 @@ static json parse_simple_function_calls(const std::string& text) {
     return tool_calls;
 }
 
+// Parse universal XML-style tool calls: <tool_call><function=name><parameter=key>value</parameter></function></tool_call>
+static json parse_universal_xml_tool_calls(const std::string& text) {
+    json tool_calls = json::array();
+    
+    try {
+        size_t pos = 0;
+        while ((pos = text.find("<tool_call>", pos)) != std::string::npos) {
+            size_t tool_call_start = pos;
+            size_t tool_call_end = text.find("</tool_call>", tool_call_start);
+            if (tool_call_end == std::string::npos) {
+                pos = tool_call_start + 11; // length of "<tool_call>"
+                continue;
+            }
+            
+            std::string tool_call_content = text.substr(tool_call_start + 11, 
+                                                      tool_call_end - tool_call_start - 11);
+            
+            // Look for <function=function_name>
+            size_t func_start = tool_call_content.find("<function=");
+            if (func_start == std::string::npos) {
+                pos = tool_call_end + 12; // length of "</tool_call>"
+                continue;
+            }
+            
+            // Find the closing >
+            size_t func_name_start = func_start + 10; // length of "<function="
+            size_t func_name_end = tool_call_content.find(">", func_name_start);
+            if (func_name_end == std::string::npos) {
+                pos = tool_call_end + 12;
+                continue;
+            }
+            
+            // Extract function name
+            std::string func_name = tool_call_content.substr(func_name_start, func_name_end - func_name_start);
+            if (func_name.empty()) {
+                pos = tool_call_end + 12;
+                continue;
+            }
+            
+            // Find </function>
+            size_t func_end = tool_call_content.find("</function>");
+            if (func_end == std::string::npos) {
+                pos = tool_call_end + 12;
+                continue;
+            }
+            
+            // Extract parameters section
+            std::string params_section = tool_call_content.substr(func_name_end + 1, func_end - func_name_end - 1);
+            
+            // Parse parameters and build JSON arguments
+            json args = json::object();
+            size_t param_pos = 0;
+            while ((param_pos = params_section.find("<parameter=", param_pos)) != std::string::npos) {
+                // Find the parameter name
+                size_t param_name_start = param_pos + 11; // length of "<parameter="
+                size_t param_name_end = params_section.find(">", param_name_start);
+                if (param_name_end == std::string::npos) break;
+                
+                std::string param_name = params_section.substr(param_name_start, param_name_end - param_name_start);
+                
+                // Find parameter value
+                size_t param_value_start = param_name_end + 1;
+                size_t param_value_end = params_section.find("</parameter>", param_value_start);
+                if (param_value_end == std::string::npos) break;
+                
+                std::string param_value = params_section.substr(param_value_start, param_value_end - param_value_start);
+                
+                // Clean up parameter value (trim whitespace)
+                param_value.erase(0, param_value.find_first_not_of(" \t\n\r"));
+                param_value.erase(param_value.find_last_not_of(" \t\n\r") + 1);
+                
+                args[param_name] = param_value;
+                param_pos = param_value_end + 12; // length of "</parameter>"
+            }
+            
+            // Generate tool call ID
+            static int universal_call_counter = 0;
+            std::string tool_id = "call_universal_k2_" + std::to_string(++universal_call_counter);
+            
+            // Create tool call object
+            json tool_call = {
+                {"id", tool_id},
+                {"type", "function"},
+                {"function", {
+                    {"name", func_name},
+                    {"arguments", args.dump()}
+                }}
+            };
+            
+            tool_calls.push_back(tool_call);
+            pos = tool_call_end + 12;
+        }
+    } catch (const std::exception&) {
+        // Return empty array on any parsing error
+        return json::array();
+    }
+    
+    return tool_calls;
+}
+
 // Main function to parse Kimi-K2 native tool calls
 static json parse_tool_calls(const std::string& text) {
     try {
@@ -398,12 +498,16 @@ static json parse_tool_calls(const std::string& text) {
                 result.push_back(call);
             }
         } else {
-            // No token format, try both XML and simple formats
+            // No token format, try XML, universal XML, and simple formats
             json xml_calls = parse_xml_function_calls(text);
+            json universal_xml_calls = parse_universal_xml_tool_calls(text);
             json simple_calls = parse_simple_function_calls(text);
             
-            // Combine results (XML takes precedence if both exist)
+            // Combine results (XML takes precedence, then universal XML, then simple)
             result = xml_calls;
+            for (const auto& call : universal_xml_calls) {
+                result.push_back(call);
+            }
             for (const auto& call : simple_calls) {
                 result.push_back(call);
             }
@@ -686,6 +790,23 @@ static bool is_partial_content_advanced(const std::string& content) {
         size_t closing_brace = find_matching_brace(content, brace_pos);
         if (closing_brace == std::string::npos) return true;
         last_complete = closing_brace + 1;
+    }
+    
+    // 5. Universal XML format partials
+    if (content.find("<function=") != std::string::npos) {
+        size_t func_pos = content.rfind("<function=");
+        std::string func_part = content.substr(func_pos);
+        
+        // Check for incomplete function tag
+        if (func_part.find("</function>") == std::string::npos) {
+            return true;
+        }
+        
+        // Check for incomplete parameter tags
+        if (func_part.find("<parameter=") != std::string::npos && 
+            func_part.find("</parameter>") == std::string::npos) {
+            return true;
+        }
     }
     
     return false;

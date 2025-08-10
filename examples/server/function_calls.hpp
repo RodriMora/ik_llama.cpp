@@ -82,7 +82,7 @@ static ik_chat_msg parse_chat_message_incremental(const std::string& content, bo
                 throw std::runtime_error("partial structured content detected");
             }
             
-            // Check for malformed XML tool call syntax
+            // Check for malformed XML tool call syntax (both JSON and universal XML formats)
             has_function_syntax = content.find("<tool_call>") != std::string::npos;
         } else if (is_deepseek_r1_model(model_name)) {
             // Use common chat parser for DeepSeek R1
@@ -127,8 +127,9 @@ static ik_chat_msg parse_chat_message_incremental(const std::string& content, bo
                 throw std::runtime_error("partial structured content detected");
             }
             
-            // Check for malformed function call syntax
-            has_function_syntax = content.find("functions.") != std::string::npos;
+            // Check for malformed function call syntax (functions. format or universal XML format)
+            has_function_syntax = content.find("functions.") != std::string::npos || 
+                                 content.find("<function=") != std::string::npos;
         }
         
         bool parsing_succeeded = !tool_calls_json.empty();
